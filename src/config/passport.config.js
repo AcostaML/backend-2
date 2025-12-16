@@ -1,24 +1,38 @@
 import passport from 'passport';
 import local from 'passport-local';
 import jwt from 'passport-jwt';
+
 import { UserModel } from '../dao/models/user.model.js';
 import { isValidPassword } from '../utils/bcrypt.js';
+import { config } from './config.js';
 
 const LocalStrategy = local.Strategy;
-const JWTStrategy   = jwt.Strategy;
-const ExtractJWT    = jwt.ExtractJwt;
+const JWTStrategy = jwt.Strategy;
+const ExtractJWT = jwt.ExtractJwt;
 
-const JWT_SECRET = process.env.JWT_SECRET || 'coderSecretJWT';
+const cookieExtractor = (req) => {
+  if (req && req.cookies) return req.cookies.jwt;
+  return null;
+};
 
+/**
+ * Inicialización de Passport
+ */
 export const initPassport = () => {
-  // Estrategia para login (email + password)
+  /**
+   * =========================
+   * LOGIN (Local Strategy)
+   * =========================
+   * Autenticación por email y password
+   * Usa sesión (cookies)
+   */
   passport.use(
     'login',
     new LocalStrategy(
       {
         usernameField: 'email',
         passwordField: 'password',
-        session: false,
+        session: true
       },
       async (email, password, done) => {
         try {
@@ -40,21 +54,63 @@ export const initPassport = () => {
     )
   );
 
-  // Estrategia "current" para validar JWT
   passport.use(
     'current',
     new JWTStrategy(
       {
-        jwtFromRequest: ExtractJWT.fromAuthHeaderAsBearerToken(),
-        secretOrKey: JWT_SECRET,
+        jwtFromRequest: ExtractJWT.fromExtractors([
+          cookieExtractor,
+          ExtractJWT.fromAuthHeaderAsBearerToken()
+        ]),
+        secretOrKey: config.jwtSecret
       },
-      async (jwtPayload, done) => {
+      async (payload, done) => {
         try {
-          // Puedes confiar en el payload o volver a buscar al user en la DB
-          const userId = jwtPayload.user?.id;
-          if (!userId) return done(null, false);
+          const user = await UserModel.findById(payload.user.id);
+          if (!user) return done(null, false);
+          return done(null, user);
+        } catch (error) {
+          return done(error, false);
+        }
+      }
+    )
+  );
 
-          const user = await UserModel.findById(userId);
+  /**
+   * =========================
+   * SERIALIZE / DESERIALIZE
+   * =========================
+   * Necesario para sesiones
+   */
+  passport.serializeUser((user, done) => {
+    done(null, user._id);
+  });
+
+  passport.deserializeUser(async (id, done) => {
+    try {
+      const user = await UserModel.findById(id);
+      done(null, user);
+    } catch (error) {
+      done(error);
+    }
+  });
+
+  /**
+   * =========================
+   * JWT (SOLO para reset password)
+   * =========================
+   * No se usa para current
+   */
+  passport.use(
+    'jwt-reset',
+    new JWTStrategy(
+      {
+        jwtFromRequest: ExtractJWT.fromUrlQueryParameter('token'),
+        secretOrKey: config.jwtSecret
+      },
+      async (payload, done) => {
+        try {
+          const user = await UserModel.findById(payload.userId);
           if (!user) return done(null, false);
 
           return done(null, user);

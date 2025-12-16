@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import passport from 'passport';
-import { UserModel } from '../dao/models/user.model.js';
-import { createHash } from '../utils/bcrypt.js';
+
+import { UserService } from '../services/user.service.js';
+import { UserCurrentDTO } from '../dtos/userCurrent.dto.js';
 import { generateToken } from '../utils/jwt.js';
 
 const router = Router();
+const userService = new UserService();
 
-// Registro de usuario
 router.post('/register', async (req, res) => {
   try {
     const { first_name, last_name, email, age, password } = req.body;
@@ -15,79 +16,87 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Campos incompletos' });
     }
 
-    const userExists = await UserModel.findOne({ email });
-    if (userExists) {
-      return res.status(400).json({ status: 'error', message: 'El usuario ya existe' });
-    }
-
-    const hashedPassword = createHash(password);
-
-    const newUser = await UserModel.create({
-      first_name,
-      last_name,
-      email,
-      age,
-      password: hashedPassword,
-      role: 'user',
-    });
+    const user = await userService.registerUser(req.body);
 
     res.status(201).json({
       status: 'success',
       payload: {
-        id: newUser._id,
-        first_name: newUser.first_name,
-        last_name: newUser.last_name,
-        email: newUser.email,
-        age: newUser.age,
-        role: newUser.role,
-      },
+        id: user._id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        email: user.email,
+        age: user.age,
+        role: user.role,
+        cart: user.cart
+      }
     });
   } catch (error) {
-    console.error('Error en /register:', error);
-    res.status(500).json({ status: 'error', message: 'Error interno en registro' });
+    res.status(400).json({ status: 'error', message: error.message });
   }
 });
 
-// Login + generación de JWT
-router.post('/login', (req, res, next) => {
-  passport.authenticate('login', { session: false }, (err, user, info) => {
-    if (err) return next(err);
+router.post(
+  '/login',
+  passport.authenticate('login', { session: false }),
+  (req, res) => {
+    const token = generateToken(req.user);
+    res
+      .cookie('jwt', token, {
+        httpOnly: true,
+        maxAge: 1000 * 60 * 60
+      })
+      .json({
+        status: 'success',
+        message: 'Login exitoso',
+        user: new UserCurrentDTO(req.user)
+      });
+  }
+);
 
-    if (!user) {
-      return res
-        .status(401)
-        .json({ status: 'error', message: info?.message || 'Credenciales inválidas' });
-    }
-
-    const token = generateToken(user);
-
-    return res.json({
-      status: 'success',
-      token,
-    });
-  })(req, res, next);
-});
-
-// /api/sessions/current -> valida token y devuelve datos del usuario
 router.get(
   '/current',
   passport.authenticate('current', { session: false }),
   (req, res) => {
-    // Si llegamos aquí, el token es válido y req.user existe
-    const user = req.user;
+    const userDTO = new UserCurrentDTO(req.user);
+    res.json({ status: 'success', user: userDTO });
+  }
+);
 
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    await userService.requestPasswordReset(email);
     res.json({
       status: 'success',
-      user: {
-        id:         user._id,
-        first_name: user.first_name,
-        last_name:  user.last_name,
-        email:      user.email,
-        age:        user.age,
-        role:       user.role,
-        cart:       user.cart,
-      },
+      message: 'Si el email existe, se enviará un correo con el enlace de recuperación'
     });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Error al enviar el correo' });
+  }
+});
+
+router.post(
+  '/reset-password',
+  passport.authenticate('jwt-reset', { session: false }),
+  async (req, res) => {
+    const { newPassword } = req.body;
+    const token = req.query.token;
+
+    if (!token || req.user.resetPasswordToken !== token) {
+      return res.status(400).json({ status: 'error', message: 'Token inválido' });
+    }
+
+    if (!req.user.resetPasswordExpires || req.user.resetPasswordExpires < Date.now()) {
+      return res.status(400).json({ status: 'error', message: 'Token expirado' });
+    }
+
+    try {
+      await userService.resetPassword(req.user._id, newPassword);
+      res.json({ status: 'success', message: 'Contraseña actualizada correctamente' });
+    } catch (error) {
+      res.status(400).json({ status: 'error', message: error.message });
+    }
   }
 );
 
